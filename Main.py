@@ -1,7 +1,7 @@
 import sys
 import numpy as np
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel
-from PySide6.QtGui import QPainter, QPen, QFont, QColor, QBrush, QLinearGradient
+from PySide6.QtGui import QPainter, QPen, QFont, QColor, QBrush
 from PySide6.QtCore import Qt
 
 
@@ -9,8 +9,7 @@ class PlotWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.setMinimumSize(800, 700)
-        self.cylinders = []  # Список для хранения цилиндров
-        self.graph_points = []  # Список для хранения точек графика
+        self.graphs = []  # Список для хранения графиков и их данных
         self.x_min = -4
         self.x_max = 4
         self.y_scale = 1.5  # Коэффициент масштабирования по оси Y
@@ -69,12 +68,20 @@ class PlotWidget(QWidget):
             # Генерируем точки графика
             x_values = np.linspace(self.x_min, self.x_max, 500)  # Увеличиваем количество точек
             y_values = func(x_values)
-            self.graph_points = list(zip(x_values, y_values))
+            graph_points = list(zip(x_values, y_values))
 
-            # Генерируем цилиндры (увеличиваем количество цилиндров)
-            x_cyl = np.linspace(self.x_min, self.x_max, 50)  # 50 цилиндров
+            # Генерируем цилиндры (уменьшаем количество цилиндров)
+            x_cyl = np.linspace(self.x_min, self.x_max, 20)  # Уменьшаем количество цилиндров до 30
             y_cyl = func(x_cyl)
-            self.cylinders = list(zip(x_cyl, y_cyl))  # (x, y) для каждого цилиндра
+            cylinders = list(zip(x_cyl, y_cyl))  # (x, y) для каждого цилиндра
+
+            # Добавляем график и цилиндры в список с уникальным цветом
+            color = self._get_soft_color()  # Используем мягкий цвет
+            self.graphs.append({
+                'points': graph_points,
+                'cylinders': cylinders,
+                'color': color
+            })
 
             self.error_label.setText("")
             self.update()  # Обновляем график
@@ -83,9 +90,16 @@ class PlotWidget(QWidget):
 
     def clear_graph(self):
         """Очищает график и цилиндры."""
-        self.cylinders = []
-        self.graph_points = []
+        self.graphs = []
         self.update()
+
+    def _get_soft_color(self):
+        """Генерирует мягкий цвет."""
+        # Генерация пастельных цветов
+        r = np.random.randint(150, 230)  # Ограничиваем яркость
+        g = np.random.randint(150, 230)
+        b = np.random.randint(150, 230)
+        return QColor(r, g, b)
 
     def paintEvent(self, event):
         """Отрисовывает график и цилиндры."""
@@ -131,12 +145,12 @@ class PlotWidget(QWidget):
             y_scaled = center_y - (value / 2) * (graph_height / 2)  # Масштабируем по y_max=2
             painter.drawText(center_x + 10, y_scaled + 5, f"{value:.1f}")
 
-        # Рисуем график функции
-        if self.graph_points:
-            y_max = 2  # Фиксированное максимальное значение по Y
-            painter.setPen(QPen(Qt.red, 2))
+        # Рисуем графики функций
+        y_max = 2  # Фиксированное максимальное значение по Y
+        for idx, graph in enumerate(self.graphs):
+            painter.setPen(QPen(graph['color'], 2))
             prev_x, prev_y = None, None
-            for x, y in self.graph_points:
+            for x, y in graph['points']:
                 x_scaled = 50 + (x - self.x_min) / (self.x_max - self.x_min) * (width - 100)
                 y_scaled = center_y - (y / y_max) * (graph_height / 2)  # Масштабируем по y_max
                 if prev_x is not None:
@@ -144,28 +158,38 @@ class PlotWidget(QWidget):
                 prev_x, prev_y = x_scaled, y_scaled
 
         # Рисуем цилиндры (инвертированные)
-        if self.cylinders:
-            y_max = 2  # Фиксированное максимальное значение по Y
-            for cylinder in self.cylinders:
+        for idx, graph in enumerate(self.graphs):
+            cylinder_color = graph['color'].darker(120)  # Слегка темнее для цилиндров
+            outline_color = graph['color'].darker(150)  # Обводка чуть темнее
+
+            # Смещение для каждой новой функции
+            x_shift = idx * 15  # Смещение по X для каждой новой функции
+
+            for cylinder in graph['cylinders']:
                 x, y = cylinder
 
                 # Масштабируем координаты
                 x_scaled = 50 + (x - self.x_min) / (self.x_max - self.x_min) * (width - 100)
                 y_scaled = center_y - (y / y_max) * (graph_height / 2)  # Масштабируем по y_max
 
+                # Применяем смещение по X
+                x_scaled += x_shift
+
                 # Параметры цилиндра
-                rect_width = 10  # Уменьшаем ширину цилиндра
+                rect_width = 15  # Увеличиваем ширину цилиндра
                 rect_height = abs(y_scaled - center_y)  # Высота цилиндра
 
-                # Градиент для цилиндра
-                gradient = QLinearGradient(0, y_scaled, 0, center_y)
-                gradient.setColorAt(0.0, QColor(135, 206, 250))  # Голубой
-                gradient.setColorAt(1.0, QColor(30, 144, 255))  # Синий
+                # Рисуем эллипс на оси X (с обводкой)
+                painter.setPen(QPen(outline_color, 1))  # Обводка темным цветом
+                painter.setBrush(QBrush(cylinder_color))  # Заливка цветом графика
+                painter.drawEllipse(
+                    int(x_scaled - rect_width / 2),
+                    int(center_y - 5),  # Эллипс на оси X
+                    int(rect_width),
+                    10
+                )
 
-                painter.setPen(QPen(Qt.blue, 2))
-                painter.setBrush(QBrush(gradient))
-
-                # Рисуем цилиндр (инвертированный)
+                # Рисуем верхнюю (или нижнюю) часть цилиндра
                 base_x = int(x_scaled - rect_width / 2)
                 base_y = int(y_scaled if y > 0 else center_y)
                 painter.drawRect(
@@ -175,12 +199,10 @@ class PlotWidget(QWidget):
                     int(rect_height)
                 )
 
-                # Рисуем верхний эллипс (на оси X)
-                painter.setPen(QPen(Qt.darkBlue, 2))
-                painter.setBrush(QBrush(QColor(70, 130, 180), Qt.SolidPattern))
+                # Рисуем нижний эллипс (на оси X) с обводкой
                 painter.drawEllipse(
                     base_x,
-                    center_y - 5 if y > 0 else center_y + rect_height - 5,
+                    base_y - 5 if y > 0 else base_y + rect_height - 5,
                     int(rect_width),
                     10
                 )
@@ -190,4 +212,4 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = PlotWidget()
     window.show()
-    sys.exit(app.exec())
+    sys.exit(app.exec_())
