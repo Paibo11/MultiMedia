@@ -2,11 +2,17 @@ import sys
 import math
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QSlider, QLabel, QPushButton, QScrollArea,
-                               QSizePolicy, QGroupBox, QButtonGroup)
+                               QSizePolicy, QGroupBox, QButtonGroup, QRadioButton)
 from PySide6.QtGui import (QPainter, QPen, QBrush, QColor, QPolygonF,
-                           QLinearGradient)
+                           QLinearGradient, QRadialGradient)
 from PySide6.QtCore import Qt, QPoint, QPointF
-from enum import Enum
+from enum import Enum, auto
+
+
+class ShadingMode(Enum):
+    FLAT = auto()
+    GOURAUD = auto()
+    PHONG = auto()
 
 
 class DisplayMode(Enum):
@@ -247,7 +253,7 @@ class SceneWidget(QWidget):
         super().__init__()
         self.setAutoFillBackground(True)
         p = self.palette()
-        p.setColor(self.backgroundRole(), QColor(150, 150, 150))
+        p.setColor(self.backgroundRole(), QColor(50, 50, 50))
         self.setPalette(p)
 
         self.x_letter = Letter3D(position_x=-60, letter_type='X')
@@ -257,50 +263,72 @@ class SceneWidget(QWidget):
         self.camera_rot = [0, 0, 0]
         self.object_transform = Matrix4x4()
         self.base_scale = 1.4
-        self.light_dir = Vector3D(0.5, -0.5, -1).normalized()  # Изменено направление света для Y вверх
+        self.light_dir = Vector3D(0.5, -0.5, -1).normalized()
         self.light_pos = self.light_dir * 150
+        self.show_light_source = True
 
         self.display_mode = DisplayMode.FILLED
+        self.shading_mode = ShadingMode.PHONG
 
         self.setMouseTracking(True)
 
-    def compute_phong_lighting(self, normal, position, face_normal):
-        ambient = 0.3
-        diffuse = 0.6
+    def compute_lighting(self, normal, position, face_normal=None):
+        ambient = 0.2
+        diffuse = 0.7
         specular = 0.5
         shininess = 32
 
-        light_dir = (self.light_pos - position).normalized()
-        to_light = light_dir
+        # Вектор к источнику света (учитываем все оси)
+        light_vec = (self.light_pos - position).normalized()
 
-        world_normal = (self.object_transform * normal).normalized()
-        world_face_normal = (self.object_transform * face_normal).normalized()
-        final_normal = (world_normal + world_face_normal).normalized()
+        # Вектор к камере
+        view_vec = (self.camera_pos - position).normalized()
 
-        if final_normal.dot(to_light) < 0:
+        # Выбираем нормаль в зависимости от метода затенения
+        if self.shading_mode == ShadingMode.PHONG:
+            # Для Фонга используем нормаль вершины
+            final_normal = (self.object_transform * normal).normalized()
+        else:
+            # Для Гуро и Flat используем нормаль грани
+            final_normal = (self.object_transform * face_normal).normalized()
+
+        # Убедимся, что нормаль направлена к камере
+        if final_normal.dot(view_vec) < 0:
             final_normal = -final_normal
 
+        # Расстояние до источника света (для затухания)
         distance = (self.light_pos - position).length()
-        attenuation = 1.0 / (1.0 + 0.09 * distance + 0.032 * distance * distance)
+        attenuation = 1.0 / (1.0 + 0.0014 * distance + 0.000007 * distance * distance)
 
-        diff = max(0, final_normal.dot(light_dir))
-        reflect_dir = (light_dir - final_normal * 2 * final_normal.dot(light_dir)).normalized()
-        spec = max(0, reflect_dir.dot(to_light)) ** shininess
+        # Диффузная составляющая
+        diff = max(0, final_normal.dot(light_vec))
 
+        # Отраженный свет
+        reflect_vec = (light_vec - final_normal * 2 * final_normal.dot(light_vec)).normalized()
+
+        # Спеулярная составляющая
+        spec = pow(max(0, reflect_vec.dot(view_vec)), shininess) if diff > 0 else 0
+
+        # Итоговая интенсивность
         intensity = (ambient + diffuse * diff + specular * spec) * attenuation
-        return min(1.0, max(0.3, intensity))
+        return min(1.0, max(0.2, intensity))
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor(150, 150, 150))
+        painter.fillRect(self.rect(), QColor(50, 50, 50))
 
         self.draw_axes(painter)
+
+        # Рисуем источник света
+        if self.show_light_source:
+            self.draw_light_source(painter)
 
         all_faces = []
         all_faces.extend(self._prepare_letter_faces(self.x_letter))
         all_faces.extend(self._prepare_letter_faces(self.k_letter))
 
+        # Сортировка граней по глубине (задние грани рисуем первыми)
         all_faces.sort(reverse=True, key=lambda x: x[0])
 
         for depth, face, screen_points, intensities, positions, normals in all_faces:
@@ -313,26 +341,37 @@ class SceneWidget(QWidget):
                     if point.x() != -1000 and point.y() != -1000:
                         painter.drawPoint(point)
             elif self.display_mode == DisplayMode.WIREFRAME:
-                painter.setPen(QPen(face.color, 2))
+                painter.setPen(QPen(QColor(200, 200, 200), 1))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawPolygon(QPolygonF(screen_points))
             elif self.display_mode == DisplayMode.FILLED:
-                self._draw_filled_face(painter, face, screen_points, intensities, positions, normals)
+                if self.shading_mode == ShadingMode.FLAT:
+                    self._draw_flat_shaded_face(painter, face, screen_points, normals[0], positions[0])
+                elif self.shading_mode == ShadingMode.GOURAUD:
+                    self._draw_gouraud_shaded_face(painter, face, screen_points, intensities, positions, normals)
+                else:  # PHONG
+                    self._draw_phong_shaded_face(painter, face, screen_points, positions, normals)
 
     def _prepare_letter_faces(self, letter):
         faces = []
         vertices = []
         normals = []
+        world_positions = []  # Добавляем список для мировых позиций
 
         # Применяем позицию буквы
         translation = Matrix4x4.translation(letter.position.x, letter.position.y, letter.position.z)
 
         for v in letter.vertices:
-            tv = translation * v  # Сначала применяем позицию буквы
-            tv = self.object_transform * tv  # Затем общие трансформации сцены
-            cv = self.apply_camera_transform(tv)
+            # Сохраняем мировую позицию до камерных преобразований
+            world_pos = translation * v
+            world_pos = self.object_transform * world_pos
+            world_positions.append(world_pos)
+
+            # Применяем камерные преобразования
+            cv = self.apply_camera_transform(world_pos)
             vertices.append(cv)
 
+            # Вычисляем нормаль вершины
             n = Vector3D(0, 0, 0)
             count = 0
             for face in letter.faces:
@@ -344,33 +383,37 @@ class SceneWidget(QWidget):
         for face in letter.faces:
             fv = [vertices[letter.vertices.index(v)] for v in face.vertices]
             fn = [normals[letter.vertices.index(v)] for v in face.vertices]
+            fw = [world_positions[letter.vertices.index(v)] for v in face.vertices]  # Мировые позиции
 
             avg_depth = sum(v.z for v in fv) / len(fv)
 
             screen_points = []
             intensities = []
-            positions = []
+            positions_for_lighting = []
+            normals_for_face = []
 
             for i, v in enumerate(fv):
                 if v.z > 0:
                     factor = 300 / v.z
                     ar = self.width() / self.height()
                     px = v.x * factor * self.base_scale * (1 / ar if ar > 1 else 1) + self.width() / 2
-                    py = -v.y * factor * self.base_scale * (1 if ar > 1 else ar) + self.height() / 2  # Инвертируем Y
+                    py = -v.y * factor * self.base_scale * (1 if ar > 1 else ar) + self.height() / 2
                     screen_points.append(QPointF(px, py))
-                    intensities.append(self.compute_phong_lighting(fn[i], v, face.normal))
-                    positions.append(v)
+                    intensities.append(self.compute_lighting(fn[i], fw[i], face.normal))
+                    positions_for_lighting.append(fw[i])
+                    normals_for_face.append(fn[i])
                 else:
                     screen_points.append(QPointF(-1000, -1000))
                     intensities.append(0)
-                    positions.append(Vector3D(0, 0, 0))
+                    positions_for_lighting.append(Vector3D(0, 0, 0))
+                    normals_for_face.append(Vector3D(0, 0, 1))
 
-            faces.append((avg_depth, face, screen_points, intensities, positions, fn))
+            faces.append((avg_depth, face, screen_points, intensities, positions_for_lighting, normals_for_face))
 
         return faces
 
-    def _draw_filled_face(self, painter, face, points, intensities, positions, normals):
-        intensity = self.compute_phong_lighting(normals[0], positions[0], face.normal)
+    def _draw_flat_shaded_face(self, painter, face, points, normal, position):
+        intensity = self.compute_lighting(normal, position, face.normal)
         color = QColor(
             min(255, int(face.color.red() * intensity)),
             min(255, int(face.color.green() * intensity)),
@@ -379,6 +422,64 @@ class SceneWidget(QWidget):
         painter.setPen(QPen(Qt.black, 1))
         painter.setBrush(QBrush(color))
         painter.drawPolygon(QPolygonF(points))
+
+    def _draw_gouraud_shaded_face(self, painter, face, points, intensities, positions, normals):
+        if len(points) < 3:
+            return
+
+        gradient = QLinearGradient(points[0], points[1] if len(points) > 1 else points[0])
+
+        for i, point in enumerate(points):
+            pos = i / (len(points) - 1) if len(points) > 1 else 0
+            color = QColor(
+                min(255, int(face.color.red() * intensities[i])),
+                min(255, int(face.color.green() * intensities[i])),
+                min(255, int(face.color.blue() * intensities[i]))
+            )
+            gradient.setColorAt(pos, color)
+
+        painter.setPen(QPen(Qt.black, 1))
+        painter.setBrush(QBrush(gradient))
+        painter.drawPolygon(QPolygonF(points))
+
+    def _draw_phong_shaded_face(self, painter, face, points, positions, normals):
+        if len(points) < 3:
+            return
+
+        # Для упрощения используем интерполяцию цветов как в Гуро
+        # В реальной реализации Фонга нужно интерполировать нормали
+        gradient = QLinearGradient(points[0], points[1] if len(points) > 1 else points[0])
+
+        for i, point in enumerate(points):
+            pos = i / (len(points) - 1) if len(points) > 1 else 0
+            intensity = self.compute_lighting(normals[i], positions[i], face.normal)
+            color = QColor(
+                min(255, int(face.color.red() * intensity)),
+                min(255, int(face.color.green() * intensity)),
+                min(255, int(face.color.blue() * intensity))
+            )
+            gradient.setColorAt(pos, color)
+
+        painter.setPen(QPen(Qt.black, 1))
+        painter.setBrush(QBrush(gradient))
+        painter.drawPolygon(QPolygonF(points))
+
+    def draw_light_source(self, painter):
+        light_pos_2d = self.project_point(self.light_pos)
+        if light_pos_2d.x() == -1000:
+            return
+
+        # Рисуем источник света как желтый круг с лучами
+        painter.setPen(QPen(Qt.yellow, 2))
+        painter.setBrush(QBrush(Qt.yellow))
+        painter.drawEllipse(light_pos_2d, 8, 8)
+
+        # Рисуем линии, указывающие направление света
+        for angle in range(0, 360, 45):
+            rad = math.radians(angle)
+            end_x = light_pos_2d.x() + 15 * math.cos(rad)
+            end_y = light_pos_2d.y() + 15 * math.sin(rad)
+            painter.drawLine(light_pos_2d, QPointF(end_x, end_y))
 
     def draw_axes(self, painter):
         origin = self.project_point(Vector3D(0, 0, 0))
@@ -404,7 +505,7 @@ class SceneWidget(QWidget):
             factor = 300 / v.z
             ar = self.width() / self.height()
             px = v.x * factor * self.base_scale * (1 / ar if ar > 1 else 1) + self.width() / 2
-            py = -v.y * factor * self.base_scale * (1 if ar > 1 else ar) + self.height() / 2  # Инвертируем Y
+            py = -v.y * factor * self.base_scale * (1 if ar > 1 else ar) + self.height() / 2
             return QPoint(int(px), int(py))
         return QPoint(-1000, -1000)
 
@@ -424,6 +525,14 @@ class SceneWidget(QWidget):
 
     def set_display_mode(self, mode):
         self.display_mode = mode
+        self.update()
+
+    def set_shading_mode(self, mode):
+        self.shading_mode = mode
+        self.update()
+
+    def toggle_light_source(self, visible):
+        self.show_light_source = visible
         self.update()
 
     def mousePressEvent(self, event):
@@ -457,7 +566,7 @@ class SceneWidget(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("3D Буквы XK")
+        self.setWindowTitle("3D Буквы XK с освещением")
         self.setGeometry(100, 100, 1000, 800)
 
         main_widget = QWidget()
@@ -482,6 +591,12 @@ class MainWindow(QMainWindow):
 
         # Режимы отображения
         self.create_display_controls(control_layout)
+
+        # Методы затенения
+        self.create_shading_controls(control_layout)
+
+        # Управление освещением
+        self.create_light_controls(control_layout)
 
         # Кнопка сброса
         reset_btn = QPushButton("Сбросить вид")
@@ -575,10 +690,72 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(group)
 
+    def create_shading_controls(self, layout):
+        group = QGroupBox("Метод затенения")
+        group_layout = QVBoxLayout(group)
+
+        btn_group = QButtonGroup(self)
+
+        flat_btn = QRadioButton("Плоское")
+        flat_btn.toggled.connect(
+            lambda: self.scene.set_shading_mode(ShadingMode.FLAT) if flat_btn.isChecked() else None)
+        btn_group.addButton(flat_btn)
+        group_layout.addWidget(flat_btn)
+
+        gouraud_btn = QRadioButton("Гуро")
+        gouraud_btn.toggled.connect(
+            lambda: self.scene.set_shading_mode(ShadingMode.GOURAUD) if gouraud_btn.isChecked() else None)
+        gouraud_btn.setChecked(True)
+        btn_group.addButton(gouraud_btn)
+        group_layout.addWidget(gouraud_btn)
+
+        phong_btn = QRadioButton("Фонг")
+        phong_btn.toggled.connect(
+            lambda: self.scene.set_shading_mode(ShadingMode.PHONG) if phong_btn.isChecked() else None)
+        btn_group.addButton(phong_btn)
+        group_layout.addWidget(phong_btn)
+
+        layout.addWidget(group)
+
+    def create_light_controls(self, layout):
+        group = QGroupBox("Управление освещением")
+        group_layout = QVBoxLayout(group)
+
+        # Видимость источника света
+        light_visible = QPushButton("Скрыть источник света")
+        light_visible.setCheckable(True)
+
+        def toggle_light_visibility(checked):
+            self.scene.toggle_light_source(not checked)
+            light_visible.setText("Показать источник света" if checked else "Скрыть источник света")
+
+        light_visible.toggled.connect(toggle_light_visibility)
+        group_layout.addWidget(light_visible)
+
+        # Позиция источника света по всем осям
+        for axis, text in [('x', 'X'), ('y', 'Y'), ('z', 'Z')]:
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(-300, 300)
+            slider.setValue(getattr(self.scene.light_pos, axis))
+            slider.valueChanged.connect(lambda v, a=axis: self.update_light_position(a, v))
+
+            label = QLabel(f"Ось {text} источника света")
+            label.setAlignment(Qt.AlignCenter)
+
+            group_layout.addWidget(label)
+            group_layout.addWidget(slider)
+
+        layout.addWidget(group)
+
     def update_letter_position(self, prefix, axis, value):
         letter = getattr(self.scene, f"{prefix}_letter")
         setattr(letter.position, axis, value)
         letter.update_geometry()
+        self.scene.update()
+
+    def update_light_position(self, axis, value):
+        setattr(self.scene.light_pos, axis, value)
+        self.scene.light_dir = self.scene.light_pos.normalized()
         self.scene.update()
 
     def rotate_object(self, axis, angle):
@@ -604,6 +781,8 @@ class MainWindow(QMainWindow):
         self.scene.light_dir = Vector3D(0.5, -0.5, -1).normalized()
         self.scene.light_pos = self.scene.light_dir * 150
         self.scene.display_mode = DisplayMode.FILLED
+        self.scene.shading_mode = ShadingMode.PHONG
+        self.scene.show_light_source = True
         self.scene.update()
 
 
